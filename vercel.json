@@ -2,7 +2,7 @@
   "framework": "vite",
   "functions": {
     "api/claude.js": {
-      "maxDuration": 60
+      "maxDuration": 120
     }
   }
 }

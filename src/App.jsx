@@ -437,7 +437,7 @@ export default function ProposalGenerator() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           max_tokens: 8192,
           system: SYSTEM_PROMPT + (budget ? `\n\nBUDGET CONTEXT — CRITICAL FOR V2 FLAGGING:
 The client's budget is ${budget === "5-10k" ? "$5,000–$10,000" : budget === "10-20k" ? "$10,000–$20,000" : budget === "20-40k" ? "$20,000–$40,000" : "$40,000+"}.
@@ -524,7 +524,7 @@ RULES:
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           max_tokens: 2048,
           system: chatSystemPrompt,
           messages: apiMessages,

@@ -145,6 +145,55 @@ const PLACEHOLDER_TRANSCRIPT = `Paste your sales call transcript here...
 
 The AI will analyze the transcript and any uploaded resources to generate a structured proposal framework matching your format.`;
 
+async function streamClaude(body, onDelta) {
+  const response = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData?.error || `API error: ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error("Streaming not supported by browser");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let eolIndex;
+    while ((eolIndex = buffer.indexOf("\n")) >= 0) {
+      const rawLine = buffer.slice(0, eolIndex);
+      buffer = buffer.slice(eolIndex + 1);
+      const line = rawLine.replace(/\r$/, "").trim();
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+
+      let evt;
+      try { evt = JSON.parse(data); } catch { continue; }
+
+      if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
+        fullText += evt.delta.text;
+        onDelta(evt.delta.text, fullText);
+      } else if (evt.type === "error") {
+        throw new Error(evt.error?.message || "Stream error");
+      }
+    }
+  }
+
+  return fullText;
+}
+
 function FileChip({ file, onRemove }) {
   const ext = file.name.split(".").pop().toLowerCase();
   const colors = {
@@ -433,41 +482,36 @@ export default function ProposalGenerator() {
         text: `Here is the sales call transcript to analyze:\n\n---\n${transcript}\n---\n\nPlease generate the structured proposal framework based on this transcript and any uploaded supplementary materials.`,
       });
 
-      const response = await fetch("/api/claude", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 8192,
-          system: SYSTEM_PROMPT + (budget ? `\n\nBUDGET CONTEXT — CRITICAL FOR V2 FLAGGING:
+      const systemPrompt = SYSTEM_PROMPT + (budget ? `\n\nBUDGET CONTEXT — CRITICAL FOR V2 FLAGGING:
 The client's budget is ${budget === "5-10k" ? "$5,000–$10,000" : budget === "10-20k" ? "$10,000–$20,000" : budget === "20-40k" ? "$20,000–$40,000" : "$40,000+"}.
 
 Adjust your [OPTIONAL] flagging aggressively based on this budget:
 ${budget === "5-10k" ? `- At this budget, only the absolute bare minimum should be v1. Flag 50-70% of features as [OPTIONAL]. Strip the scope down to: core auth, the single most important user flow, basic account management, and the simplest possible admin. Everything else — secondary user types, advanced search, analytics, notifications, chat, complex admin tools, reporting — should all be [OPTIONAL]. The goal is a functional MVP that proves the concept in ~70-140 dev hours.` : ""}${budget === "10-20k" ? `- At this budget, be selective. Flag 35-50% of features as [OPTIONAL]. Keep the core user flows, auth, primary value prop, basic admin, and one key integration. Defer advanced features, secondary user type enhancements, analytics, complex admin tools, and nice-to-have integrations. Target ~140-280 dev hours for v1.` : ""}${budget === "20-40k" ? `- At this budget, include most core features. Flag 15-30% of features as [OPTIONAL]. Only defer genuinely secondary features like advanced analytics, complex reporting, recommendation engines, or features the client themselves described as "nice to have." Target ~280-560 dev hours.` : ""}${budget === "40k+" ? `- At this budget, include everything discussed. Only flag features as [OPTIONAL] if the transcript itself indicates they should be deferred or they are genuinely phase 2 items the client mentioned. Flag 0-15% at most.` : ""}
-The budget context should ONLY affect which features get [OPTIONAL] tags. It should NOT affect the quality, detail, or completeness of the proposal itself — still list every feature, still write detailed bullets, still provide estimates. The client needs to see the full picture even if many items are flagged V2.` : ""),
-          messages: [{ role: "user", content: contentBlocks }],
-        }),
+The budget context should ONLY affect which features get [OPTIONAL] tags. It should NOT affect the quality, detail, or completeness of the proposal itself — still list every feature, still write detailed bullets, still provide estimates. The client needs to see the full picture even if many items are flagged V2.` : "");
+
+      const separator = "===OPEN_QUESTIONS===";
+
+      const fullText = await streamClaude({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system: systemPrompt,
+        messages: [{ role: "user", content: contentBlocks }],
+      }, (_chunk, accumulated) => {
+        const sepIdx = accumulated.indexOf(separator);
+        if (sepIdx !== -1) {
+          setOutput(accumulated.substring(0, sepIdx).trim());
+          setQuestions(accumulated.substring(sepIdx + separator.length).trim());
+        } else {
+          setOutput(accumulated);
+        }
       });
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData?.error?.message || `API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const text = data.content
-        .filter(b => b.type === "text")
-        .map(b => b.text)
-        .join("\n");
-
-      // Split proposal from questions
-      const separator = "===OPEN_QUESTIONS===";
-      const sepIdx = text.indexOf(separator);
+      const sepIdx = fullText.indexOf(separator);
       if (sepIdx !== -1) {
-        setOutput(text.substring(0, sepIdx).trim());
-        setQuestions(text.substring(sepIdx + separator.length).trim());
+        setOutput(fullText.substring(0, sepIdx).trim());
+        setQuestions(fullText.substring(sepIdx + separator.length).trim());
       } else {
-        setOutput(text);
+        setOutput(fullText);
         setQuestions("");
       }
     } catch (err) {
@@ -520,31 +564,31 @@ RULES:
         content: m.content,
       }));
 
-      const response = await fetch("/api/claude", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 2048,
-          system: chatSystemPrompt,
-          messages: apiMessages,
-        }),
+      setChatMessages([...newMessages, { role: "assistant", content: "" }]);
+
+      await streamClaude({
+        model: "claude-sonnet-4-6",
+        max_tokens: 2048,
+        system: chatSystemPrompt,
+        messages: apiMessages,
+      }, (_chunk, accumulated) => {
+        setChatMessages(prev => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content: accumulated };
+          return updated;
+        });
       });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData?.error?.message || `API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const reply = data.content
-        .filter(b => b.type === "text")
-        .map(b => b.text)
-        .join("\n");
-
-      setChatMessages(prev => [...prev, { role: "assistant", content: reply }]);
     } catch (err) {
-      setChatMessages(prev => [...prev, { role: "assistant", content: `Error: ${err.message}` }]);
+      setChatMessages(prev => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last && last.role === "assistant" && !last.content) {
+          updated[updated.length - 1] = { role: "assistant", content: `Error: ${err.message}` };
+        } else {
+          updated.push({ role: "assistant", content: `Error: ${err.message}` });
+        }
+        return updated;
+      });
     } finally {
       setChatLoading(false);
     }
